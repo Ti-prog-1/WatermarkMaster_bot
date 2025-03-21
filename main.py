@@ -92,7 +92,7 @@ translations = {
 }
 
 # Токен бота
-API_TOKEN = '7836922222:AAGTftJGamdIsXRoV4sISdgt-ECtv6fTFsY'
+API_TOKEN = '8051188195:AAF69e5tHSU80MR2YBTD0eaNM7Eq5wQ-xf0'
 
 # Включаем логирование
 logging.basicConfig(level=logging.INFO)
