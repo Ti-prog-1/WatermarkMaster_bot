@@ -1,0 +1,210 @@
+import logging
+import asyncio
+import os
+from background import keep_alive
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import Message, FSInputFile, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.filters import Command
+from PIL import Image
+
+# Токен бота
+API_TOKEN = '7553035806:AAFEF2N74kpaOswTQwkYkIsn0W_4PZ-Qs_U'
+
+# Включаем логирование
+logging.basicConfig(level=logging.INFO)
+
+# Инициализируем бота и диспетчер
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
+processing_lock = asyncio.Lock()
+# Папки для хранения изображений
+IMAGE_DIR = "images"
+WATERMARK_DIR = "watermarks"
+os.makedirs(IMAGE_DIR, exist_ok=True)
+os.makedirs(WATERMARK_DIR, exist_ok=True)
+
+# Глобальный словарь для хранения выбранной позиции водяного знака для каждого пользователя
+# По умолчанию: "справа" (нижний правый угол)
+watermark_positions = {}
+
+# Основная клавиатура
+menu_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🗑 Удалить логотип")],
+        [KeyboardButton(text="Выбрать место водяного знака на фото")]
+    ],
+    resize_keyboard=True
+)
+
+# Клавиатура для выбора позиции водяного знака
+position_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="слева"), KeyboardButton(text="справа")],
+        [KeyboardButton(text="вверху"), KeyboardButton(text="внизу")],
+        [KeyboardButton(text="по центру")]
+    ],
+    resize_keyboard=True
+)
+
+# Команда /start
+@dp.message(Command("start"))
+async def start_cmd(message: Message):
+    await message.answer("Привет! Отправь мне логотип (JPG или PNG).", reply_markup=menu_keyboard)
+
+# Команда /menu
+@dp.message(Command("menu"))
+async def menu_cmd(message: Message):
+    await message.answer("Выберите действие:", reply_markup=menu_keyboard)
+
+# Удаление логотипа
+@dp.message(lambda message: message.text == "🗑 Удалить логотип")
+async def delete_logo(message: Message):
+    user_id = message.from_user.id
+    watermark_path_jpg = os.path.join(WATERMARK_DIR, f"{user_id}.jpg")
+    watermark_path_png = os.path.join(WATERMARK_DIR, f"{user_id}.png")
+
+    if os.path.exists(watermark_path_jpg):
+        os.remove(watermark_path_jpg)
+    if os.path.exists(watermark_path_png):
+        os.remove(watermark_path_png)
+
+    await message.answer("✅ Ваш логотип удалён. Отправьте новый логотип.", reply_markup=menu_keyboard)
+
+# Выбор места водяного знака
+@dp.message(lambda message: message.text == "Выбрать место водяного знака на фото")
+async def choose_position(message: Message):
+    await message.answer("Выберите место для водяного знака:", reply_markup=position_keyboard)
+
+# Обработчик выбора позиции водяного знака
+@dp.message(lambda message: message.text in ["слева", "справа", "вверху", "внизу", "по центру"])
+async def set_position(message: Message):
+    user_id = message.from_user.id
+    watermark_positions[user_id] = message.text
+    await message.answer(f"✅ Позиция водяного знака установлена: {message.text}.", reply_markup=menu_keyboard)
+
+# Проверка: Есть ли у пользователя логотип?
+def has_logo(user_id):
+    return (
+        os.path.exists(os.path.join(WATERMARK_DIR, f"{user_id}.png")) or
+        os.path.exists(os.path.join(WATERMARK_DIR, f"{user_id}.jpg"))
+    )
+
+# Обработчик логотипов (файлы JPG/PNG)
+@dp.message(lambda message: message.document and not has_logo(message.from_user.id))
+async def handle_document(message: Message):
+    user_id = message.from_user.id
+    document = message.document
+
+    # Определяем формат файла
+    file_ext = document.file_name.split('.')[-1].lower()
+    if file_ext not in ["jpg", "jpeg", "png"]:
+        await message.answer("⚠ Поддерживаются только форматы JPG и PNG!")
+        return
+
+    # Сохранение логотипа
+    watermark_path = os.path.join(WATERMARK_DIR, f"{user_id}.{file_ext}")
+    file = await bot.get_file(document.file_id)
+    await bot.download_file(file.file_path, watermark_path)
+
+    await message.answer(f"✅ Логотип ({file_ext.upper()}) сохранён! Теперь отправьте фото для водяного знака.")
+
+# Обработчик логотипов (фото)
+@dp.message(lambda message: message.photo and not has_logo(message.from_user.id))
+async def handle_logo_photo(message: Message):
+    user_id = message.from_user.id
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+
+    # Сохраняем фото как JPG (Telegram уже его сжал)
+    watermark_path = os.path.join(WATERMARK_DIR, f"{user_id}.jpg")
+    await bot.download_file(file.file_path, watermark_path)
+
+    await message.answer("✅ Логотип (JPG) сохранён! Теперь отправьте фото для водяного знака.")
+    await message.answer("⚠ Если у вас PNG с прозрачностью, загружайте его как ФАЙЛ (📎), иначе фон станет белым!")
+
+@dp.message(lambda message: message.photo or (message.document and message.document.mime_type.startswith("image/")))
+async def handle_image(message: Message):
+    user_id = message.from_user.id
+
+    async with processing_lock:  # Блокируем обработку
+        # Проверяем, есть ли логотип
+        watermark_path = os.path.join(WATERMARK_DIR, f"{user_id}.png")
+        if not os.path.exists(watermark_path):
+            watermark_path = os.path.join(WATERMARK_DIR, f"{user_id}.jpg")
+
+        if not os.path.exists(watermark_path):
+            await message.answer("⚠ Сначала загрузите логотип (JPG или PNG)!")
+            return
+
+        # Определяем имя файла и путь
+        if message.photo:
+            photo = message.photo[-1]
+            file = await bot.get_file(photo.file_id)
+            image_path = os.path.join(IMAGE_DIR, f"{user_id}.jpg")
+        else:
+            document = message.document
+            file_ext = document.file_name.split('.')[-1].lower()
+            if file_ext not in ["jpg", "jpeg", "png"]:
+                await message.answer("⚠ Поддерживаются только JPG и PNG!")
+                return
+            file = await bot.get_file(document.file_id)
+            image_path = os.path.join(IMAGE_DIR, f"{user_id}.{file_ext}")
+
+        # Загружаем фото
+        await bot.download_file(file.file_path, image_path)
+
+        # Обрабатываем изображение
+        result_path = add_watermark(image_path, watermark_path, watermark_positions.get(user_id, "справа"))
+        photo_file = FSInputFile(result_path)
+        await message.answer_document(photo_file, caption="✅ Готово! Водяной знак добавлен.")
+
+
+# Функция наложения прозрачного водяного знака с учетом выбранной позиции
+def add_watermark(image_path, watermark_path, position_choice):
+    base_image = Image.open(image_path).convert("RGBA")
+    watermark = Image.open(watermark_path).convert("RGBA")
+
+    # Изменяем размер водяного знака (20% от ширины изображения)
+    base_width, base_height = base_image.size
+    wm_width = int(base_width * 0.2)
+    wm_height = int(watermark.height * (wm_width / watermark.width))
+    watermark = watermark.resize((wm_width, wm_height), Image.LANCZOS)
+
+    # Создаём альфа-канал с 50% прозрачности
+    alpha = watermark.split()[3]  # Берём альфа-канал
+    alpha = alpha.point(lambda p: p * 0.5)  # Уменьшаем прозрачность на 50%
+    watermark.putalpha(alpha)
+
+    # Определяем позицию водяного знака
+    if position_choice == "слева":
+        position = (10, (base_height - wm_height) // 2)  # Центр по высоте слева
+    elif position_choice == "справа":
+        position = (base_width - wm_width - 10, (base_height - wm_height) // 2)  # Центр по высоте справа
+    elif position_choice == "вверху":
+        position = ((base_width - wm_width) // 2, 10)
+    elif position_choice == "внизу":
+        position = ((base_width - wm_width) // 2, base_height - wm_height - 10)
+    elif position_choice == "по центру":
+        position = ((base_width - wm_width) // 2, (base_height - wm_height) // 2)
+    else:
+        position = (base_width - wm_width - 10, base_height - wm_height - 10)
+
+    # Накладываем водяной знак
+    transparent = Image.new("RGBA", base_image.size, (0, 0, 0, 0))
+    transparent.paste(base_image, (0, 0))
+    transparent.paste(watermark, position, mask=watermark)
+
+    # Сохраняем в PNG (чтобы не терять прозрачность)
+    result_path = image_path.replace(".jpg", "_watermarked.png").replace(".png", "_watermarked.png")
+    transparent.save(result_path, "PNG")
+    return result_path
+
+# Запускаем Flask для удержания активности
+keep_alive()
+
+# Запуск бота
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
