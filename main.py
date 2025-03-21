@@ -91,7 +91,7 @@ translations = {
 
 }
 
-# Токен бота
+# Токен ботаasd
 API_TOKEN = '8051188195:AAF69e5tHSU80MR2YBTD0eaNM7Eq5wQ-xf0'
 
 # Включаем логирование
